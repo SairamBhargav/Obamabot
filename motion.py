@@ -1,15 +1,34 @@
 import cv2
+import numpy as np
 from ultralytics import YOLO
 
 # ================= CONFIGURATION =================
 ESP32_IP = "192.168.0.119"
 STREAM_URL = f"http://{ESP32_IP}:81/stream"
 
-# SKIP_FRAMES: 
-# 3 is a sweet spot. It means AI runs 10 times a second (fast enough),
-# while video runs at full speed (30+ FPS).
+# Skip frames to keep speed high (3 is usually best)
 SKIP_FRAMES = 3 
 # =================================================
+
+def apply_improvements(frame):
+    # 1. CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    # This balances the light/dark areas so faces are visible even in shadow.
+    # It converts to LAB color space, fixes the Light (L) channel, and merges back.
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l)
+    limg = cv2.merge((cl, a, b))
+    enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+
+    # 2. SHARPENING
+    # This kernel makes edges crisper (like glasses for the camera)
+    kernel = np.array([[0, -1, 0],
+                       [-1, 5,-1],
+                       [0, -1, 0]])
+    sharpened = cv2.filter2D(enhanced, -1, kernel)
+    
+    return sharpened
 
 def main():
     print("Loading AI Model...")
@@ -25,7 +44,6 @@ def main():
     print("✅ Connected! (Press 'q' to quit)")
 
     frame_count = 0
-    # Store the box coordinates here: [x1, y1, x2, y2, confidence, class_id]
     current_boxes = [] 
 
     while True:
@@ -34,39 +52,36 @@ def main():
             print("Stream error.")
             break
 
-        # Resize for consistent speed
+        # Resize first (Speed)
         frame = cv2.resize(frame, (640, 480))
 
-        # === 1. AI DETECTION (Only runs every 3rd frame) ===
+        # === 🔴 APPLY IMAGE ENHANCEMENTS ===
+        # This fixes the lighting/blur so the AI can see EVERYONE better
+        frame = apply_improvements(frame)
+
+        # === AI DETECTION ===
         if frame_count % SKIP_FRAMES == 0:
-            # Run YOLO. classes=[0] checks only for 'person'
-            # conf=0.25 is standard sensitivity
-            results = model(frame, stream=True, verbose=False, classes=[0], conf=0.25)
+            # conf=0.20: Lowered confidence so it catches people more easily
+            results = model(frame, stream=True, verbose=False, classes=[0], conf=0.20)
             
-            # Clear old boxes and save new ones
             current_boxes = []
             for r in results:
-                # r.boxes.data contains [x1, y1, x2, y2, conf, cls]
                 for box in r.boxes.data.tolist():
                     current_boxes.append(box)
         
         frame_count += 1
 
-        # === 2. DRAWING (Runs EVERY frame) ===
-        # We draw the "remembered" boxes onto the current live frame
+        # === DRAWING ===
         for box in current_boxes:
             x1, y1, x2, y2, conf, cls = box
-            # Convert to integers for drawing
             x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
             
-            # Draw Red Box
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            # Draw Label
-            label = f"Human {conf:.2f}"
-            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            # Draw Box
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            # Label
+            cv2.putText(frame, "Person", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        # Show the final image
-        cv2.imshow("Fast Human Detector", frame)
+        cv2.imshow("Enhanced Detector", frame)
 
         if cv2.waitKey(1) == ord('q'):
             break
