@@ -6,33 +6,24 @@ from ultralytics import YOLO
 ESP32_IP = "192.168.0.119"
 STREAM_URL = f"http://{ESP32_IP}:81/stream"
 
-# Skip frames to keep speed high (3 is usually best)
-SKIP_FRAMES = 3 
+# SKIP_FRAMES: We need to skip more frames because the new AI is heavier/smarter
+SKIP_FRAMES = 4 
+
+# GAMMA: Controls how much we brighten the dark areas (1.0 = normal, 2.5 = very bright shadows)
+GAMMA_LEVEL = 1.5 
 # =================================================
 
-def apply_improvements(frame):
-    # 1. CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    # This balances the light/dark areas so faces are visible even in shadow.
-    # It converts to LAB color space, fixes the Light (L) channel, and merges back.
-    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    cl = clahe.apply(l)
-    limg = cv2.merge((cl, a, b))
-    enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-
-    # 2. SHARPENING
-    # This kernel makes edges crisper (like glasses for the camera)
-    kernel = np.array([[0, -1, 0],
-                       [-1, 5,-1],
-                       [0, -1, 0]])
-    sharpened = cv2.filter2D(enhanced, -1, kernel)
-    
-    return sharpened
+def adjust_gamma(image, gamma=1.0):
+    # This function boosts the visibility of darker pixels
+    invGamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** invGamma) * 255
+        for i in np.arange(0, 256)]).astype("uint8")
+    return cv2.LUT(image, table)
 
 def main():
-    print("Loading AI Model...")
-    model = YOLO('yolov8n.pt') 
+    print("Loading Upgrade AI Model (yolov8s)... this takes a second...")
+    # Switched from 'n' (nano) to 's' (small). 's' is much more accurate.
+    model = YOLO('yolov8s.pt') 
 
     print(f"Connecting to {STREAM_URL}...")
     cap = cv2.VideoCapture(STREAM_URL)
@@ -52,17 +43,19 @@ def main():
             print("Stream error.")
             break
 
-        # Resize first (Speed)
-        frame = cv2.resize(frame, (640, 480))
+        # === 1. PREPARE IMAGE FOR AI ===
+        # Resize small for speed
+        ai_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+        
+        # 🔴 CRITICAL FIX: GAMMA CORRECTION
+        # This brightens the image significantly for the AI so it can see faces
+        # that usually get hidden in shadow.
+        ai_frame = adjust_gamma(ai_frame, gamma=GAMMA_LEVEL)
 
-        # === 🔴 APPLY IMAGE ENHANCEMENTS ===
-        # This fixes the lighting/blur so the AI can see EVERYONE better
-        frame = apply_improvements(frame)
-
-        # === AI DETECTION ===
+        # === 2. AI DETECTION ===
         if frame_count % SKIP_FRAMES == 0:
-            # conf=0.20: Lowered confidence so it catches people more easily
-            results = model(frame, stream=True, verbose=False, classes=[0], conf=0.20)
+            # conf=0.20: Low threshold to catch everyone
+            results = model(ai_frame, stream=True, verbose=False, classes=[0], conf=0.20)
             
             current_boxes = []
             for r in results:
@@ -71,17 +64,28 @@ def main():
         
         frame_count += 1
 
-        # === DRAWING ===
+        # === 3. DRAWING ON ORIGINAL FRAME ===
         for box in current_boxes:
             x1, y1, x2, y2, conf, cls = box
-            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            
+            # Scale coordinates back up (x2 because we resized by 0.5)
+            scale = 2 
+            x1, y1, x2, y2 = int(x1*scale), int(y1*scale), int(x2*scale), int(y2*scale)
             
             # Draw Box
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            # Label
-            cv2.putText(frame, "Person", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Draw Label
+            label = f"Human {int(conf*100)}%"
+            t_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+            cv2.rectangle(frame, (x1, y1 - t_size[1] - 5), (x1 + t_size[0], y1), (0, 255, 0), -1)
+            cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
-        cv2.imshow("Enhanced Detector", frame)
+        # Show the normal video (we don't show the gamma-boosted one because it looks washed out)
+        cv2.imshow("Pro Human Detector", frame)
+        
+        # Optional: Uncomment this to see what the AI sees (The brightened version)
+        # cv2.imshow("AI Vision (Debug)", ai_frame)
 
         if cv2.waitKey(1) == ord('q'):
             break
